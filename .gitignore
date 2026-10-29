@@ -1,0 +1,5 @@
+connections.yml
+desktops/
+askpass.cmd
+*.tmp
+*.lnk

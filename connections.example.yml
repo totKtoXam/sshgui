@@ -1,0 +1,13 @@
+# Пример подключений. Скопируйте в connections.yml (он в .gitignore).
+# password: null — ключ или ввод вручную; можно вписать пароль открытым текстом —
+# при первом запуске он будет заменён на 'dpapi:...' (Windows DPAPI, только этот пользователь и ПК).
+groups:
+  - name: 'Dev'
+    color: '#5f97dd'
+connections:
+  - name: 'my-server'
+    group: 'Dev'
+    address: '192.168.0.10'
+    port: 22
+    login: 'user'
+    password: null
