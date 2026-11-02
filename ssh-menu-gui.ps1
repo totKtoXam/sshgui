@@ -503,7 +503,7 @@ function Invoke-Files {
         $launchArgs = @('-NoLogo', '-NoProfile', '-STA', '-WindowStyle', 'Hidden', '-File', (Join-Path $PSScriptRoot 'ssh-desktop.ps1'),
             '-ConfigPath', $ConfigPath, '-Name', $c.Name, '-Address', $c.Address, '-Port', "$($c.Port)")
         if ($c.Login) { $launchArgs += '-Login', $c.Login }
-        Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList $launchArgs | Out-Null
+        Start-HiddenPwsh $launchArgs
         Set-Status "Рабочий стол: $($c.Name)"
     }
 }

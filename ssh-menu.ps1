@@ -570,6 +570,16 @@ function Read-Credentials($Conn) {
 # Результат — в $script:SessionFinished.
 # Открывает ssh в НОВОЙ вкладке Windows Terminal (если wt.exe нет — в отдельном окне консоли).
 # Пароль в командную строку попадает только в зашифрованном DPAPI виде и расшифровывается внутри новой сессии.
+# Запускает pwsh без консоли. Start-Process -WindowStyle Hidden не годится: если Windows Terminal
+# назначен терминалом по умолчанию, он всё равно открывает вкладку под скрытую консоль.
+function Start-HiddenPwsh([string[]]$ArgList) {
+    $psi = [Diagnostics.ProcessStartInfo]::new((Get-Command pwsh.exe).Source)
+    foreach ($a in $ArgList) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    [void][Diagnostics.Process]::Start($psi)
+}
+
 function Start-TerminalSsh($Conn) {
     $sshArgs = @('-o', 'ConnectTimeout=10')
     $setup = @()
@@ -880,12 +890,12 @@ function Start-Menu {
                 $guiArgs = @('-NoLogo','-NoProfile','-STA','-WindowStyle','Hidden','-File',(Join-Path $PSScriptRoot 'ssh-desktop.ps1'),
                     '-ConfigPath',$ConfigPath,'-Name',$c.Name,'-Address',$c.Address,'-Port',"$($c.Port)")
                 if ($c.Login) { $guiArgs += '-Login',$c.Login }
-                Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList $guiArgs | Out-Null
+                Start-HiddenPwsh $guiArgs
                 $script:Status = "Рабочий стол открыт: $($c.Name)"
                 $selectConn = $c
             }
             'gui' {
-                Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList @('-NoLogo','-NoProfile','-STA','-WindowStyle','Hidden','-File',(Join-Path $PSScriptRoot 'ssh-menu-gui.ps1'),'-ConfigPath',$ConfigPath) | Out-Null
+                Start-HiddenPwsh @('-NoLogo','-NoProfile','-STA','-File',(Join-Path $PSScriptRoot 'ssh-menu-gui.ps1'),'-ConfigPath',$ConfigPath)
                 $script:Status = 'GUI-меню открыто'
                 $selectConn = $current.Conn
             }
