@@ -22,7 +22,8 @@ param(
     [string]$Screenshot,   # для проверки: снимок рабочего стола и выход
     [string]$TestRemote,   # для проверки: открыть окно сервера по этому пути при старте
     [string]$TestVirtual,  # для проверки: открыть окно виртуальной папки с этим Id при старте
-    [string]$TestView      # для проверки: режим отображения large|small|list
+    [string]$TestView,     # для проверки: режим отображения large|small|list
+    [string]$TestDelete    # для проверки: удалить эту папку сервера (с резервной копией) при старте
 )
 
 $ErrorActionPreference = 'Stop'
@@ -528,7 +529,12 @@ $windowXaml = @'
           <Button x:Name="BtnUp" Style="{StaticResource IconBtn}" Content="&#xE74A;" ToolTip="Вверх"/>
           <Button x:Name="BtnReload" Style="{StaticResource IconBtn}" Content="&#xE72C;" ToolTip="Обновить"/>
         </StackPanel>
-        <TextBox x:Name="PathBox"/>
+        <Grid>
+          <Border x:Name="Crumbs" Background="#262626" CornerRadius="4" Padding="4,0" MinHeight="30" Cursor="IBeam">
+            <StackPanel x:Name="CrumbPanel" Orientation="Horizontal" VerticalAlignment="Center"/>
+          </Border>
+          <TextBox x:Name="PathBox" Visibility="Collapsed"/>
+        </Grid>
       </DockPanel>
     </Border>
     <Grid Grid.Row="2">
@@ -540,6 +546,15 @@ $windowXaml = @'
         <StackPanel x:Name="SidePanel" Margin="6,8"/>
       </Border>
       <ScrollViewer x:Name="Scroll" Grid.Column="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="Transparent"/>
+      <TextBlock x:Name="Hint" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#8A8A8A" FontSize="14" IsHitTestVisible="False" Visibility="Collapsed"/>
+      <ProgressBar x:Name="Busy" Grid.Column="1" Height="3" VerticalAlignment="Top" IsIndeterminate="True" Visibility="Collapsed" Foreground="#8FA876" Background="Transparent" BorderThickness="0"/>
+      <Border x:Name="Banner" Grid.Column="1" VerticalAlignment="Top" Margin="12,10,12,0" Padding="12,8" CornerRadius="6" Background="#5A2A2A" BorderBrush="#8A3F3F" BorderThickness="1" Visibility="Collapsed">
+        <DockPanel>
+          <Button x:Name="BtnBannerClose" DockPanel.Dock="Right" Style="{StaticResource IconBtn}" Content="&#xE8BB;" Margin="8,0,0,0" VerticalAlignment="Top"/>
+          <Button x:Name="BtnRetry" DockPanel.Dock="Right" Content="Повторить" Margin="8,0,0,0" VerticalAlignment="Center"/>
+          <TextBlock x:Name="BannerText" TextWrapping="Wrap" Foreground="#F2D0D0" VerticalAlignment="Center"/>
+        </DockPanel>
+      </Border>
     </Grid>
     <Border Grid.Row="3" Padding="12,4" Background="#2B2B2B" CornerRadius="0,0,7,7">
       <TextBlock x:Name="WinStatus" Foreground="#9A9A9A" FontSize="12" TextTrimming="CharacterEllipsis"/>
@@ -961,9 +976,9 @@ $script:Z = 10
 function New-FloatWindow([string]$Type) {
     $root = Read-Xaml $windowXaml
     $w = @{ Root = $root; Type = $Type; Closed = $false; Restore = $null }
-    $names = 'TitleBar', 'TitleText', 'BtnMin', 'BtnMax', 'BtnClose', 'BtnView', 'NavBar', 'BtnBack', 'BtnUp', 'BtnReload', 'PathBox', 'Side', 'SidePanel', 'Scroll', 'WinStatus', 'Grip'
+    $names = 'TitleBar', 'TitleText', 'BtnMin', 'BtnMax', 'BtnClose', 'BtnView', 'NavBar', 'BtnBack', 'BtnUp', 'BtnReload', 'PathBox', 'Side', 'SidePanel', 'Scroll', 'WinStatus', 'Grip', 'Crumbs', 'CrumbPanel', 'Hint', 'Busy', 'Banner', 'BannerText', 'BtnRetry', 'BtnBannerClose'
     foreach ($n in $names) { $w[$n] = $root.FindName($n) }
-    foreach ($n in 'TitleBar', 'BtnMin', 'BtnMax', 'BtnClose', 'BtnView', 'BtnBack', 'BtnUp', 'BtnReload', 'PathBox', 'Grip') { $w[$n].Tag = $w }
+    foreach ($n in 'TitleBar', 'BtnMin', 'BtnMax', 'BtnClose', 'BtnView', 'BtnBack', 'BtnUp', 'BtnReload', 'PathBox', 'Grip', 'Crumbs', 'BtnRetry', 'BtnBannerClose') { $w[$n].Tag = $w }
     $root.Tag = $w
 
     $n = $script:Windows.Count % 8
@@ -1069,6 +1084,7 @@ function Open-VirtualWindow($VItem) {
     $w.Id = $VItem.Id
     $w.NavBar.Visibility = 'Collapsed'; $w.Side.Visibility = 'Collapsed'
     $w.PathBox.IsReadOnly = $true
+    $w.Crumbs.Visibility = 'Collapsed'; $w.PathBox.Visibility = 'Visible'
     $canvas = [Windows.Controls.Canvas]::new()
     $canvas.Background = [Windows.Media.Brushes]::Transparent
     $canvas.HorizontalAlignment = 'Left'
@@ -1103,10 +1119,101 @@ function Open-RemoteWindow([string]$Path, [switch]$NoLoad) {
     $w.BtnUp.Add_Click($script:H_RUp)
     $w.BtnReload.Add_Click($script:H_RReload)
     $w.PathBox.Add_KeyDown($script:H_RPathKey)
+    $w.PathBox.Add_LostKeyboardFocus($script:H_PathLost)
+    $w.Crumbs.Add_MouseLeftButtonUp($script:H_CrumbsUp)
+    $w.BtnRetry.Add_Click($script:H_Retry)
+    $w.BtnBannerClose.Add_Click($script:H_BannerClose)
+    $w.Scroll.Add_PreviewMouseWheel($script:H_Wheel)
     $w.TitleText.Text = 'Сервер'
     Initialize-Side $w
     if ($NoLoad) { $w.Cwd = $Path } else { Update-Remote $w $Path $true }
     return $w
+}
+
+$script:IconScale = 1.0
+
+function Set-Loading($w, [bool]$On) {
+    $w.Busy.Visibility = if ($On) { 'Visible' } else { 'Collapsed' }
+    if ($On -and -not @($w.Entries).Count -and -not $w.Cwd) { $w.Hint.Text = 'Загрузка…'; $w.Hint.Visibility = 'Visible' }
+    else { $w.Hint.Visibility = 'Collapsed' }
+}
+
+function Show-Banner($w, [string]$Text) {
+    $hint = if ($Text -match 'Permission denied') { "`nПроверьте пароль или ключ в меню подключений (F2 — изменить)." } else { '' }
+    $w.BannerText.Text = $Text + $hint
+    $w.Banner.Visibility = 'Visible'
+    Set-Loading $w $false
+}
+
+$script:H_Retry = {
+    param($s, $e)
+    $w = $s.Tag
+    $w.Banner.Visibility = 'Collapsed'
+    Update-Remote $w $(if ($w.Cwd) { $w.Cwd } else { $w.Path }) $false
+}
+$script:H_BannerClose = { param($s, $e) $s.Tag.Banner.Visibility = 'Collapsed' }
+
+# --- хлебные крошки: клик по сегменту — переход, клик по пустому месту (или Ctrl+L) — ввод пути ---
+function Enter-PathEdit($w) {
+    $w.Crumbs.Visibility = 'Collapsed'
+    $w.PathBox.Visibility = 'Visible'
+    [void]$w.PathBox.Focus()
+    $w.PathBox.SelectAll()
+}
+function Exit-PathEdit($w) {
+    if ($w.Type -ne 'remote') { return }
+    $w.PathBox.Visibility = 'Collapsed'
+    $w.Crumbs.Visibility = 'Visible'
+}
+$script:H_CrumbClick = {
+    param($s, $e)
+    Update-Remote $s.Tag.W $s.Tag.Path $true
+    $e.Handled = $true
+}
+$script:H_CrumbIn = { param($s, $e) $s.Background = New-Brush '#FFFFFF' 0x22 }
+$script:H_CrumbOut = { param($s, $e) $s.Background = [Windows.Media.Brushes]::Transparent }
+$script:H_CrumbsUp = {
+    param($s, $e)
+    if ($e.OriginalSource -isnot [Windows.Controls.TextBlock]) { Enter-PathEdit $s.Tag }
+}
+$script:H_PathLost = { param($s, $e) Exit-PathEdit $s.Tag }
+
+function Add-Crumb($w, [string]$Text, [string]$Path, [bool]$Sep) {
+    if ($Sep) {
+        $sp = [Windows.Controls.TextBlock]::new()
+        $sp.Text = '›'; $sp.Foreground = New-Brush '#7A7A7A'; $sp.VerticalAlignment = 'Center'
+        [void]$w.CrumbPanel.Children.Add($sp)
+    }
+    $t = [Windows.Controls.TextBlock]::new()
+    $t.Text = $Text; $t.Padding = [Windows.Thickness]::new(6, 4, 6, 4)
+    $t.Foreground = New-Brush '#DADADA'; $t.Cursor = [Windows.Input.Cursors]::Hand
+    $t.Background = [Windows.Media.Brushes]::Transparent
+    $t.Tag = @{ W = $w; Path = $Path }
+    $t.Add_MouseLeftButtonUp($script:H_CrumbClick)
+    $t.Add_MouseEnter($script:H_CrumbIn)
+    $t.Add_MouseLeave($script:H_CrumbOut)
+    [void]$w.CrumbPanel.Children.Add($t)
+}
+
+function Update-Crumbs($w) {
+    $w.CrumbPanel.Children.Clear()
+    $acc = ''
+    Add-Crumb $w '/' '/' $false
+    foreach ($seg in @($w.Cwd -split '/' | Where-Object { $_ })) {
+        $acc += "/$seg"
+        Add-Crumb $w $seg $acc $true
+    }
+}
+
+$script:H_Wheel = {
+    param($s, $e)
+    if (-not ([Windows.Input.Keyboard]::Modifiers -band [Windows.Input.ModifierKeys]::Control)) { return }
+    $step = if ($e.Delta -gt 0) { 0.1 } else { -0.1 }
+    $script:IconScale = [Math]::Round([Math]::Min(1.8, [Math]::Max(0.6, $script:IconScale + $step)), 1)
+    $w = $s.Tag.Win
+    if ($w.Cwd) { Show-Remote $w }
+    Set-Status "Размер значков: $([int]($script:IconScale * 100))%"
+    $e.Handled = $true
 }
 
 $script:ListCache = @{}
@@ -1125,6 +1232,8 @@ function Update-Remote($w, [string]$Path, [bool]$PushHistory) {
         $PushHistory = $false
     }
     else { $w.WinStatus.Text = '⏳ Загрузка…' }
+    $w.Banner.Visibility = 'Collapsed'
+    Set-Loading $w $true
     Start-SftpOp @("cd $(ConvertTo-SftpArg $Path)", 'pwd', 'ls -la') $script:D_Listing @{ W = $w; Push = $PushHistory; Path = $Path }
 }
 
@@ -1133,6 +1242,7 @@ function Show-Remote($w) {
     $mode = $w.View
     $panel = if ($mode -eq 'list') { [Windows.Controls.StackPanel]::new() } else { [Windows.Controls.WrapPanel]::new() }
     $panel.Margin = [Windows.Thickness]::new(8)
+    if ($script:IconScale -ne 1.0 -and $mode -ne 'list') { $panel.LayoutTransform = [Windows.Media.ScaleTransform]::new($script:IconScale, $script:IconScale) }
     $w.Panel = $panel
     $w.Scroll.Content = $panel
     $show = [bool]$w.ShowHidden
@@ -1149,6 +1259,7 @@ function Show-Remote($w) {
         [void]$w.Panel.Children.Add((New-Icon $item $w $mode))
     }
     $w.PathBox.Text = $w.Cwd
+    Update-Crumbs $w
     $w.TitleText.Text = "Сервер — $($w.Cwd)"
     $w.WinStatus.Text = "Объектов: $($entries.Count)" + $(if (-not $entries.Count) { ' — папка пуста' } else { '' })
     if ($w.Search) {
@@ -1215,6 +1326,58 @@ function Start-RemoteSearch($w, [string]$Query) {
     Start-SshExec $cmd $script:D_Search @{ W = $w; Query = $q; Dir = $w.Cwd }
 }
 
+$script:BackupRoot = Join-Path $env:LOCALAPPDATA "ssh-desktop\backups\$([IO.Path]::GetFileNameWithoutExtension($StorePath))"
+
+# Сначала копия на этот ПК, и только если она удалась — удаление на сервере.
+function Start-DeleteWithBackup($Items, $w, [bool]$Recursive) {
+    $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+    $dir = Join-Path $script:BackupRoot $stamp
+    [void](New-Item -ItemType Directory -Force -Path (Join-Path $dir 'files'))
+    $st = @{ Items = $Items; W = $w; Recursive = $Recursive; Dir = $dir }
+    if ($Recursive) {
+        Set-Status '⏳ Оцениваю размер для резервной копии…'
+        Start-SshExec ('du -skc -- ' + (($Items | ForEach-Object { ConvertTo-ShellArg $_.Path }) -join ' ') + ' 2>/dev/null | tail -n 1') $script:D_BackupSize $st
+    }
+    else { Start-BackupCopy $st }
+}
+
+function Start-BackupCopy($st) {
+    $k = 0; $cmds = @(); $manifest = @()
+    foreach ($i in $st.Items) {
+        $k++
+        $leaf = ($i.Path -split '/')[-1]
+        $rel = "files\${k}_$leaf"
+        $isLink = [bool]$i.IsLink
+        if (-not $isLink) {
+            $flag = if ($i.IsDir) { '-r ' } else { '' }
+            $cmds += "get -p $flag$(ConvertTo-SftpArg $i.Path) $(ConvertTo-SftpArg ((Join-Path $st.Dir $rel) -replace '\\', '/'))"
+        }
+        $manifest += @{ Remote = $i.Path; Local = $rel; IsDir = [bool]$i.IsDir; IsLink = $isLink }
+    }
+    $st.Manifest = $manifest
+    if (-not $cmds.Count) { & $script:D_BackupDone @{ Out = ''; Err = '' } $st; return }
+    Set-Status "⏳ Резервная копия на ПК: $($st.Items.Count)…"
+    Start-SftpOp $cmds $script:D_BackupDone $st
+}
+
+function Restore-Backup {
+    if (-not (Test-Path -LiteralPath $script:BackupRoot)) { Show-Warn 'Резервных копий пока нет.'; return }
+    $dir = Select-LocalFolder 'Выберите папку резервной копии (внутри есть manifest.json)' $script:BackupRoot
+    if (-not $dir) { return }
+    $mf = Join-Path $dir 'manifest.json'
+    if (-not (Test-Path -LiteralPath $mf)) { Show-Warn 'В этой папке нет manifest.json — это не резервная копия.'; return }
+    $items = @(Get-Content -LiteralPath $mf -Raw -Encoding utf8 | ConvertFrom-Json) | Where-Object { -not $_.IsLink }
+    if (-not $items) { Show-Warn 'В копии нечего восстанавливать.'; return }
+    $list = ($items | Select-Object -First 12 | ForEach-Object { "  • $($_.Remote)" }) -join "`n"
+    if ([Windows.MessageBox]::Show($script:Main, "Загрузить НА СЕРВЕР обратно (существующие файлы будут перезаписаны):`n$list", 'SSH — изменение сервера', 'YesNo', 'Warning') -ne 'Yes') { return }
+    $cmds = foreach ($i in $items) {
+        $flag = if ($i.IsDir) { '-r ' } else { '' }
+        "put -p $flag$(ConvertTo-SftpArg ((Join-Path $dir $i.Local) -replace '\\', '/')) $(ConvertTo-SftpArg $i.Remote)"
+    }
+    Set-Status '⏳ Восстанавливаю на сервер…'
+    Start-SftpOp @($cmds) $script:D_Changed @{ W = @{ Closed = $true }; What = 'Восстановлено' }
+}
+
 function Remove-RemoteItems($Items, $w) {
     $Items = @($Items)
     if (-not $Items.Count) { return }
@@ -1225,22 +1388,20 @@ function Remove-RemoteItems($Items, $w) {
     $list = ($Items | Select-Object -First 12 | ForEach-Object { "  • $($_.Path)" }) -join "`n"
     if ($Items.Count -gt 12) { $list += "`n  … и ещё $($Items.Count - 12)" }
     if ($dirs.Count) {
-        $typed = Read-Text 'Удаление на сервере' "ОПАСНО. БЕЗ КОРЗИНЫ будет удалено НА СЕРВЕРЕ, папки (всего $($dirs.Count)) — вместе со ВСЕМ содержимым:`n$list`n`nЧтобы подтвердить, введите слово УДАЛИТЬ:" ''
+        $typed = Read-Text 'Удаление на сервере' "ОПАСНО. Будет удалено НА СЕРВЕРЕ, папки (всего $($dirs.Count)) — вместе со ВСЕМ содержимым:`n$list`n`nПеред удалением копия сохранится на этом ПК.`nЧтобы подтвердить, введите слово УДАЛИТЬ:" ''
         if ($typed -ne 'УДАЛИТЬ') { Set-Status 'Удаление отменено'; return }
-        $cmd = 'rm -rf -- ' + (($Items | ForEach-Object { ConvertTo-ShellArg $_.Path }) -join ' ')
-        Set-Status '⏳ Удаляю на сервере…'
-        Start-SshExec $cmd $script:D_Changed @{ W = $w; What = 'Удалено' }
+        Start-DeleteWithBackup $Items $w $true
     }
     else {
-        if ([Windows.MessageBox]::Show($script:Main, "УДАЛИТЬ НА СЕРВЕРЕ без корзины:`n$list", 'SSH — изменение сервера', 'YesNo', 'Warning') -ne 'Yes') { return }
-        Start-SftpOp @($Items | ForEach-Object { "rm $(ConvertTo-SftpArg $_.Path)" }) $script:D_Changed @{ W = $w; What = 'Удалено' }
+        if ([Windows.MessageBox]::Show($script:Main, "УДАЛИТЬ НА СЕРВЕРЕ:`n$list`n`nПеред удалением копия сохранится на этом ПК.", 'SSH — изменение сервера', 'YesNo', 'Warning') -ne 'Yes') { return }
+        Start-DeleteWithBackup $Items $w $false
     }
 }
 
-function Select-LocalFolder([string]$Description) {
+function Select-LocalFolder([string]$Description, [string]$StartPath) {
     $dlg = [Windows.Forms.FolderBrowserDialog]::new()
     $dlg.Description = $Description
-    $dlg.SelectedPath = Join-Path $env:USERPROFILE 'Downloads'
+    $dlg.SelectedPath = if ($StartPath) { $StartPath } else { Join-Path $env:USERPROFILE 'Downloads' }
     $wrap = [Win32Owner]::new()
     $wrap.Handle = [Windows.Interop.WindowInteropHelper]::new($script:Main).Handle
     if ($dlg.ShowDialog($wrap) -ne 'OK') { return $null }
@@ -1619,7 +1780,9 @@ $script:H_RUp = {
 $script:H_RReload = { param($s, $e) Update-Remote $s.Tag $(if ($s.Tag.Cwd) { $s.Tag.Cwd } else { $s.Tag.Path }) $false }
 $script:H_RPathKey = {
     param($s, $e)
-    if ($s.Tag.Type -eq 'remote' -and $e.Key -eq 'Return' -and $s.Text.Trim()) { Update-Remote $s.Tag $s.Text.Trim() $true; $e.Handled = $true }
+    if ($s.Tag.Type -ne 'remote') { return }
+    if ($e.Key -eq 'Return' -and $s.Text.Trim()) { Update-Remote $s.Tag $s.Text.Trim() $true; Exit-PathEdit $s.Tag; $e.Handled = $true }
+    elseif ($e.Key -eq 'Escape') { Exit-PathEdit $s.Tag; $e.Handled = $true }
 }
 
 function Select-UploadFiles($w) {
@@ -1755,6 +1918,9 @@ $script:H_StartClick = {
     [void](Add-MenuItem $menu 'Обновить окна' $null $script:M_RefreshAll)
     [void](Add-MenuItem $menu 'Создать ярлык на рабочем столе Windows' $null $script:M_Shortcut)
     Add-MenuItem $menu '-'
+    [void](Add-MenuItem $menu 'Резервные копии удалённого (папка)' $null { param($m, $a) if (-not (Test-Path -LiteralPath $script:BackupRoot)) { [void](New-Item -ItemType Directory -Force -Path $script:BackupRoot) }; Start-Process explorer.exe $script:BackupRoot })
+    [void](Add-MenuItem $menu 'Восстановить из резервной копии…' $null { param($m, $a) Restore-Backup })
+    Add-MenuItem $menu '-'
     [void](Add-MenuItem $menu 'Закрыть рабочий стол' $null { param($m, $a) $script:Main.Close() })
     $menu.PlacementTarget = $s
     $menu.Placement = 'Top'
@@ -1848,10 +2014,11 @@ $script:D_Listing = {
     $w = $st.W
     if ($w.Closed) { return }
     $w.Loading = $false
+    Set-Loading $w $false
     $err = Get-SftpError $res
-    if ($err) { $w.WinStatus.Text = "⚠ $err"; return }
+    if ($err) { $w.WinStatus.Text = "⚠ $err"; Show-Banner $w $err; return }
     $parsed = ConvertFrom-SftpLs $res.Out
-    if (-not $parsed.Cwd) { $w.WinStatus.Text = '⚠ Не удалось прочитать каталог'; return }
+    if (-not $parsed.Cwd) { $w.WinStatus.Text = '⚠ Не удалось прочитать каталог'; Show-Banner $w 'Не удалось прочитать каталог'; return }
     if ($st.Push -and $w.Cwd -and $w.Cwd -ne $parsed.Cwd) { $w.History.Add($w.Cwd) }
     $cached = $script:ListCache[$parsed.Cwd]
     $same = $cached -and $w.Cwd -eq $parsed.Cwd -and -not $w.Search -and (Get-EntriesSignature $cached.Entries) -eq (Get-EntriesSignature $parsed.Entries)
@@ -1870,6 +2037,37 @@ $script:D_OpenFile = {
     if ($err) { Set-Status "⚠ $err"; return }
     Set-Status "Открыто: $($st.Local)"
     Start-Process -FilePath $st.Local
+}
+$script:D_BackupSize = {
+    param($res, $st)
+    $kb = 0
+    try { $kb = [long](($res.Out.Trim() -split '\s+')[0]) } catch { }
+    if ($kb -gt 1048576) {
+        $gb = [Math]::Round($kb / 1048576, 1)
+        $ans = [Windows.MessageBox]::Show($script:Main, "Резервная копия займёт около $gb ГБ на диске этого ПК ($($st.Dir)).`n`nДа — сделать копию и удалить.`nНет — отменить удаление.", 'SSH — резервная копия', 'YesNo', 'Question')
+        if ($ans -ne 'Yes') { Remove-Item -LiteralPath $st.Dir -Recurse -Force -ErrorAction SilentlyContinue; Set-Status 'Удаление отменено'; return }
+    }
+    Start-BackupCopy $st
+}
+$script:D_BackupDone = {
+    param($res, $st)
+    $err = Get-SftpError $res
+    if ($err) {
+        Show-Warn "Резервная копия не удалась — НИЧЕГО НЕ УДАЛЕНО.`n`n$err"
+        Set-Status '⚠ Удаление отменено: копия не сделана'
+        return
+    }
+    $meta = @{ Host = "$($script:Conn.Login)@$($script:Conn.Address):$($script:Conn.Port)"; Date = (Get-Date).ToString('s') }
+    [IO.File]::WriteAllText((Join-Path $st.Dir 'manifest.json'), (ConvertTo-Json @($st.Manifest | ForEach-Object { [pscustomobject]$_ }) -Depth 4), [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $st.Dir 'info.json'), (ConvertTo-Json $meta), [Text.UTF8Encoding]::new($false))
+    $what = "Удалено (копия на ПК: $($st.Dir))"
+    Set-Status '⏳ Удаляю на сервере…'
+    if ($st.Recursive) {
+        Start-SshExec ('rm -rf -- ' + (($st.Items | ForEach-Object { ConvertTo-ShellArg $_.Path }) -join ' ')) $script:D_Changed @{ W = $st.W; What = $what }
+    }
+    else {
+        Start-SftpOp @($st.Items | ForEach-Object { "rm $(ConvertTo-SftpArg $_.Path)" }) $script:D_Changed @{ W = $st.W; What = $what }
+    }
 }
 $script:D_EditReady = {
     param($res, $st)
@@ -1922,7 +2120,7 @@ $script:D_Changed = {
     param($res, $st)
     $w = $st.W
     $err = Get-SftpError $res
-    if ($err) { if (-not $w.Closed) { $w.WinStatus.Text = "⚠ $err" }; Set-Status "⚠ $err"; return }
+    if ($err) { if (-not $w.Closed) { $w.WinStatus.Text = "⚠ $err"; Show-Banner $w $err }; Set-Status "⚠ $err"; return }
     Set-Status "$($st.What) на сервере"
     if (-not $w.Closed) { Update-Remote $w $w.Cwd $false }
 }
@@ -1962,11 +2160,35 @@ $script:H_TypeAhead = {
     else { Set-Status "Поиск: «$buf» — нет совпадений" }
     $e.Handled = $true
 }
+function Get-ActiveRemoteWin {
+    @($script:Windows | Where-Object { $_.Type -eq 'remote' -and $_.Panel -and $_.Root.Visibility -eq 'Visible' } |
+            Sort-Object { [Windows.Controls.Panel]::GetZIndex($_.Root) } -Descending) | Select-Object -First 1
+}
 $script:H_TypeKey = {
     param($s, $e)
     if ([Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.TextBox]) { return }
-    if ($e.Key -eq 'Return' -and $script:Sel.Count -eq 1) { Open-Item $script:Sel[0].Tag; $e.Handled = $true }
-    elseif ($e.Key -eq 'Escape') { $script:TypeBuf = ''; Clear-Selection }
+    $key = if ($e.Key -eq 'System') { $e.SystemKey } else { $e.Key }
+    $mods = [Windows.Input.Keyboard]::Modifiers
+    $ctrl = [bool]($mods -band [Windows.Input.ModifierKeys]::Control)
+    $alt = [bool]($mods -band [Windows.Input.ModifierKeys]::Alt)
+    $w = Get-ActiveRemoteWin
+    $sel = @(Get-SelTags)
+    $handled = $true
+    if ($key -eq 'Return' -and $sel.Count -eq 1) { Open-Item $sel[0] }
+    elseif ($key -eq 'Escape') { $script:TypeBuf = ''; Clear-Selection }
+    elseif ($key -eq 'F5' -and $w -and $w.Cwd) { Update-Remote $w $w.Cwd $false }
+    elseif ($key -eq 'L' -and $ctrl -and $w) { Enter-PathEdit $w }
+    elseif ($key -eq 'A' -and $ctrl -and $w) { Clear-Selection; foreach ($ic in @($w.Panel.Children)) { Add-ToSelection $ic } }
+    elseif ($key -eq 'Left' -and $alt -and $w) { & $script:H_RBack ([pscustomobject]@{ Tag = $w }) $null }
+    elseif ($key -eq 'Up' -and $alt -and $w) { & $script:H_RUp ([pscustomobject]@{ Tag = $w }) $null }
+    elseif ($key -eq 'Back' -and $w) { & $script:H_RBack ([pscustomobject]@{ Tag = $w }) $null }
+    elseif ($key -eq 'F2' -and $sel.Count -eq 1 -and $sel[0].Item.Kind -eq 'remote') { & $script:M_RRename ([pscustomobject]@{ Tag = $sel[0] }) $null }
+    elseif ($key -eq 'Delete' -and $sel.Count) {
+        if (@($sel | Where-Object { $_.Item.Kind -ne 'remote' }).Count -eq 0) { Remove-RemoteItems @($sel | ForEach-Object { $_.Item }) $sel[0].Win }
+        else { & $script:M_VRemoveMany ([pscustomobject]@{ Tag = @{ Tags = $sel } }) $null }
+    }
+    else { $handled = $false }
+    if ($handled) { $e.Handled = $true }
 }
 
 $script:TickN = 0
@@ -2045,6 +2267,7 @@ $script:Main.Add_ContentRendered({
         Update-AllVirtual
         if ($TestVirtual) { $v = Get-VItem $TestVirtual; if ($v) { Open-VirtualWindow $v } }
         if ($TestRemote) { Open-RemoteWindow $TestRemote }
+        if ($TestDelete) { Start-DeleteWithBackup @(@{ Path = $TestDelete; IsDir = $true; IsLink = $false }) @{ Closed = $true } $true }
         if (-not ($Screenshot -or $TestRemote -or $TestVirtual)) {
             foreach ($s in @($script:SavedWindows)) {
                 try {
@@ -2065,7 +2288,7 @@ $script:Main.Add_ContentRendered({
         if ($Screenshot) {
             $script:ShotPath = $Screenshot
             $script:ShotTimer = [Windows.Threading.DispatcherTimer]::new()
-            $script:ShotTimer.Interval = [TimeSpan]::FromSeconds($(if ($TestRemote) { 7 } else { 1 }))
+            $script:ShotTimer.Interval = [TimeSpan]::FromSeconds($(if ($TestDelete) { 14 } elseif ($TestRemote) { 7 } else { 1 }))
             $script:ShotTimer.Add_Tick($script:H_Shot)
             $script:ShotTimer.Start()
         }
