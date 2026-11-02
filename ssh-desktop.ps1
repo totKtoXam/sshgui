@@ -1109,10 +1109,23 @@ function Open-RemoteWindow([string]$Path, [switch]$NoLoad) {
     return $w
 }
 
+$script:ListCache = @{}
+function Get-EntriesSignature($Entries) { (@($Entries | ForEach-Object { "$($_.Name)|$($_.Size)|$($_.Date)" }) -join ';') }
+
 function Update-Remote($w, [string]$Path, [bool]$PushHistory) {
     $w.Loading = $true
-    $w.WinStatus.Text = '⏳ Загрузка…'
-    Start-SftpOp @("cd $(ConvertTo-SftpArg $Path)", 'pwd', 'ls -la') $script:D_Listing @{ W = $w; Push = $PushHistory }
+    $c = $script:ListCache[$Path]
+    if ($c) {
+        # Мгновенно показываем сохранённый список, а свежий подгружаем в фоне.
+        if ($PushHistory -and $w.Cwd -and $w.Cwd -ne $c.Cwd) { $w.History.Add($w.Cwd) }
+        $w.Search = $null
+        $w.Cwd = $c.Cwd; $w.Entries = $c.Entries
+        Show-Remote $w
+        $w.WinStatus.Text += '  ·  обновляю…'
+        $PushHistory = $false
+    }
+    else { $w.WinStatus.Text = '⏳ Загрузка…' }
+    Start-SftpOp @("cd $(ConvertTo-SftpArg $Path)", 'pwd', 'ls -la') $script:D_Listing @{ W = $w; Push = $PushHistory; Path = $Path }
 }
 
 function Show-Remote($w) {
@@ -1840,6 +1853,12 @@ $script:D_Listing = {
     $parsed = ConvertFrom-SftpLs $res.Out
     if (-not $parsed.Cwd) { $w.WinStatus.Text = '⚠ Не удалось прочитать каталог'; return }
     if ($st.Push -and $w.Cwd -and $w.Cwd -ne $parsed.Cwd) { $w.History.Add($w.Cwd) }
+    $cached = $script:ListCache[$parsed.Cwd]
+    $same = $cached -and $w.Cwd -eq $parsed.Cwd -and -not $w.Search -and (Get-EntriesSignature $cached.Entries) -eq (Get-EntriesSignature $parsed.Entries)
+    $entry = @{ Cwd = $parsed.Cwd; Entries = $parsed.Entries }
+    $script:ListCache[$parsed.Cwd] = $entry
+    if ($st.Path) { $script:ListCache[$st.Path] = $entry }
+    if ($same) { $w.WinStatus.Text = $w.WinStatus.Text -replace '  ·  обновляю…', ''; return }
     $w.Search = $null
     $w.Cwd = $parsed.Cwd
     $w.Entries = $parsed.Entries
@@ -1914,6 +1933,42 @@ $script:H_Shot = {
     $script:Main.Close()
 }
 
+# Поиск набором с клавиатуры, как в проводнике: печатаем начало имени — выделяется первый подходящий значок.
+$script:TypeBuf = ''
+$script:TypeAt = [datetime]::MinValue
+$script:H_TypeAhead = {
+    param($s, $e)
+    if ($e.OriginalSource -is [Windows.Controls.TextBox] -or [Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.TextBox]) { return }
+    $ch = $e.Text
+    if (-not $ch -or [char]::IsControl($ch[0])) { return }
+    $w = @($script:Windows | Where-Object { $_.Type -eq 'remote' -and $_.Panel -and $_.Root.Visibility -eq 'Visible' } |
+            Sort-Object { [Windows.Controls.Panel]::GetZIndex($_.Root) } -Descending) | Select-Object -First 1
+    if (-not $w) { return }
+    if (([datetime]::Now - $script:TypeAt).TotalMilliseconds -gt 1000) { $script:TypeBuf = '' }
+    $script:TypeAt = [datetime]::Now
+    $script:TypeBuf += $ch
+    $buf = $script:TypeBuf
+    $icons = @($w.Panel.Children)
+    $hit = $icons | Where-Object { $_.Tag -and $_.Tag.Item.Name.StartsWith($buf, [StringComparison]::CurrentCultureIgnoreCase) } | Select-Object -First 1
+    if (-not $hit -and $buf.Length -gt 1 -and $buf.ToCharArray().Where({ $_ -eq $buf[0] }).Count -eq $buf.Length) {
+        # повтор одной буквы — перебор по кругу
+        $hit = $icons | Where-Object { $_.Tag -and $_.Tag.Item.Name.StartsWith([string]$buf[0], [StringComparison]::CurrentCultureIgnoreCase) } | Select-Object -Skip 1 -First 1
+    }
+    if ($hit) {
+        Select-Icon $hit
+        $hit.BringIntoView()
+        Set-Status "Поиск: «$buf» → $($hit.Tag.Item.Name)"
+    }
+    else { Set-Status "Поиск: «$buf» — нет совпадений" }
+    $e.Handled = $true
+}
+$script:H_TypeKey = {
+    param($s, $e)
+    if ([Windows.Input.Keyboard]::FocusedElement -is [Windows.Controls.TextBox]) { return }
+    if ($e.Key -eq 'Return' -and $script:Sel.Count -eq 1) { Open-Item $script:Sel[0].Tag; $e.Handled = $true }
+    elseif ($e.Key -eq 'Escape') { $script:TypeBuf = ''; Clear-Selection }
+}
+
 $script:TickN = 0
 $script:H_Tick = {
     $script:TickN++
@@ -1938,6 +1993,8 @@ $script:H_Tick = {
 Read-Store
 
 $script:Main = Read-Xaml $mainXaml
+$script:Main.Add_PreviewTextInput($script:H_TypeAhead)
+$script:Main.Add_PreviewKeyDown($script:H_TypeKey)
 $script:Main.Title = "Рабочий стол — $($script:Conn.Name)"
 $script:Stage = $script:Main.FindName('Stage')
 $script:Desktop = $script:Main.FindName('Desktop')
